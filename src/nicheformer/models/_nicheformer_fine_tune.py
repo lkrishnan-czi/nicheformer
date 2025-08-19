@@ -355,19 +355,19 @@ class NicheformerFineTune(pl.LightningModule):
         data_key = 'X'
 
         # Add auxiliary tokens
-        if self.backbone.hparams.modality:
+        if self.backbone.hparams.modality and 'modality' in batch:
             x = batch[data_key]
             modality = batch['modality']
             x = torch.cat((modality.reshape(-1, 1), x), dim=1)
             batch[data_key] = x
 
-        if self.backbone.hparams.assay:
+        if self.backbone.hparams.assay and 'assay' in batch:
             x = batch[data_key]
             assay = batch['assay']
             x = torch.cat((assay.reshape(-1, 1), x), dim=1)
             batch[data_key] = x
 
-        if self.backbone.hparams.specie:
+        if self.backbone.hparams.specie and 'specie' in batch:
             x = batch[data_key]
             specie = batch['specie']
             x = torch.cat((specie.reshape(-1, 1), x), dim=1)

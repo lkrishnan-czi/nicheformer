@@ -12,6 +12,10 @@ import numba
 def sf_normalize(X):
     """Normalize the input matrix to a scale of 10000."""
     X = X.copy()
+    # Ensure X is float type to avoid casting errors during multiplication
+    if not issparse(X) and not np.issubdtype(X.dtype, np.floating):
+        X = X.astype(np.float64)
+    
     counts = np.array(X.sum(axis=1))
     # avoid zero devision error
     counts += counts == 0.
@@ -24,6 +28,126 @@ def sf_normalize(X):
         np.multiply(X, scaling_factor.reshape((-1, 1)), out=X)
 
     return X
+
+
+def compute_technology_mean(adata):
+    """
+    Compute technology mean from AnnData object.
+    
+    Args:
+        adata: AnnData object with gene expression data
+        
+    Returns:
+        np.array: Technology mean values for each gene
+    """
+    if issparse(adata.X):
+        tech_mean = np.array(adata.X.mean(axis=0)).flatten()
+    else:
+        tech_mean = adata.X.mean(axis=0)
+    
+    # Handle zeros and NaN values
+    tech_mean = np.nan_to_num(tech_mean)
+    tech_mean += tech_mean == 0
+    
+    return tech_mean
+
+
+def create_splits(adata, train_frac=0.7, val_frac=0.15, test_frac=0.15, random_state=42, stratify_col=None, min_cells_per_class=3):
+    """
+    Create train/validation/test splits for AnnData object.
+    
+    Args:
+        adata: AnnData object to create splits for
+        train_frac: Fraction of data for training (default: 0.7)
+        val_frac: Fraction of data for validation (default: 0.15)
+        test_frac: Fraction of data for testing (default: 0.15)
+        random_state: Random seed for reproducibility (default: 42)
+        stratify_col: Column name in adata.obs to stratify splits by (optional)
+        min_cells_per_class: Minimum cells per class for stratification (default: 3)
+        
+    Returns:
+        AnnData: Modified adata object with 'nicheformer_split' column added
+    """
+    import pandas as pd
+    from sklearn.model_selection import train_test_split
+    
+    # Verify fractions sum to 1
+    assert abs(train_frac + val_frac + test_frac - 1.0) < 1e-6, "Fractions must sum to 1.0"
+    
+    # Filter out rare classes if stratifying
+    if stratify_col is not None and stratify_col in adata.obs.columns:
+        # Check class distribution
+        class_counts = adata.obs[stratify_col].value_counts()
+        rare_classes = class_counts[class_counts < min_cells_per_class]
+        
+        if len(rare_classes) > 0:
+            print(f"Warning: Found {len(rare_classes)} cell types with < {min_cells_per_class} cells:")
+            for cell_type, count in rare_classes.items():
+                print(f"  - {cell_type}: {count} cells")
+            
+            # Filter out rare classes
+            print(f"Removing {rare_classes.sum()} cells from rare classes...")
+            mask = ~adata.obs[stratify_col].isin(rare_classes.index)
+            adata = adata[mask].copy()
+            print(f"Remaining cells: {len(adata):,}")
+            
+            # Update class counts
+            class_counts = adata.obs[stratify_col].value_counts()
+            print(f"Remaining cell types: {len(class_counts)}")
+    
+    n_cells = len(adata)
+    indices = np.arange(n_cells)
+    
+    # Stratification data
+    stratify_data = None
+    if stratify_col is not None:
+        if stratify_col not in adata.obs.columns:
+            print(f"Warning: Stratify column '{stratify_col}' not found, using random splits")
+        else:
+            stratify_data = adata.obs[stratify_col].values
+    
+    # First split: separate train from (val + test)
+    train_indices, temp_indices = train_test_split(
+        indices, 
+        test_size=(val_frac + test_frac),
+        random_state=random_state,
+        stratify=stratify_data
+    )
+    
+    # Second split: separate val from test
+    if stratify_data is not None:
+        temp_stratify = stratify_data[temp_indices]
+    else:
+        temp_stratify = None
+        
+    val_indices, test_indices = train_test_split(
+        temp_indices,
+        test_size=(test_frac / (val_frac + test_frac)),
+        random_state=random_state,
+        stratify=temp_stratify
+    )
+    
+    # Create split labels
+    split_labels = np.full(n_cells, '', dtype=object)
+    split_labels[train_indices] = 'train'
+    split_labels[val_indices] = 'val'
+    split_labels[test_indices] = 'test'
+    
+    # Add to adata
+    adata.obs['nicheformer_split'] = split_labels
+    
+    # Print split statistics
+    print(f"Created splits:")
+    print(f"  Train: {len(train_indices):,} cells ({len(train_indices)/n_cells:.1%})")
+    print(f"  Val:   {len(val_indices):,} cells ({len(val_indices)/n_cells:.1%})")
+    print(f"  Test:  {len(test_indices):,} cells ({len(test_indices)/n_cells:.1%})")
+    
+    if stratify_col is not None and stratify_col in adata.obs.columns:
+        print(f"\nSplit distribution by '{stratify_col}':")
+        split_stats = pd.crosstab(adata.obs['nicheformer_split'], adata.obs[stratify_col], margins=True)
+        print(split_stats)
+    
+    return adata
 
 
 @numba.jit(nopython=True, nogil=True)
@@ -78,7 +202,23 @@ class NicheformerDataset(Dataset):
                                       'obsm': ['field3', 'field4']  # fields from adata.obsm
                                   }
         """
-        self.adata = adata[adata.obs.nicheformer_split == split].copy()
+        self.adata = adata.copy()
+        
+        # Filter by split if specified
+        if split is not None:
+            split_column = 'nicheformer_split'
+            if split_column not in self.adata.obs.columns:
+                raise ValueError(f"Split column '{split_column}' not found in adata.obs. "
+                               f"Please create splits first using create_splits() function.")
+            
+            split_mask = self.adata.obs[split_column] == split
+            if not split_mask.any():
+                raise ValueError(f"No cells found for split '{split}'. "
+                               f"Available splits: {self.adata.obs[split_column].unique()}")
+            
+            self.adata = self.adata[split_mask].copy()
+            print(f"Using {split} split with {len(self.adata)} cells")
+        
         self.technology_mean = technology_mean
         self.max_seq_len = max_seq_len
         self.aux_tokens = aux_tokens
@@ -129,6 +269,7 @@ class NicheformerDataset(Dataset):
 
         tech_mean = self.technology_mean
         tech_mean += tech_mean == 0
+
         x = x / tech_mean.reshape((1, -1))
 
         # Tokenize
@@ -165,6 +306,29 @@ class NicheformerDataset(Dataset):
 
         # Add all metadata fields to the item
         for key, value in self.metadata.items():
-            item[key] = torch.tensor(value[idx])
+            # Handle different data types appropriately
+            if isinstance(value[idx], (str, np.str_)):
+                # For categorical/string data, we need to convert to numerical labels
+                if not hasattr(self, '_label_encoders'):
+                    self._label_encoders = {}
+                
+                if key not in self._label_encoders:
+                    from sklearn.preprocessing import LabelEncoder
+                    self._label_encoders[key] = LabelEncoder()
+                    # Fit on all unique values for this field
+                    unique_vals = np.unique(value)
+                    self._label_encoders[key].fit(unique_vals)
+                
+                # Transform the current value
+                encoded_val = self._label_encoders[key].transform([value[idx]])[0]
+                item[key] = torch.tensor(encoded_val, dtype=torch.long)
+            else:
+                # For numerical data, convert to appropriate tensor type
+                if np.issubdtype(type(value[idx]), np.integer):
+                    item[key] = torch.tensor(value[idx], dtype=torch.long)
+                elif np.issubdtype(type(value[idx]), np.floating):
+                    item[key] = torch.tensor(value[idx], dtype=torch.float32)
+                else:
+                    item[key] = torch.tensor(value[idx])
 
         return item
