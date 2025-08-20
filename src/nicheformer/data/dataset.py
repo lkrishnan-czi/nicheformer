@@ -161,12 +161,15 @@ def _sub_tokenize_data(x: np.array, max_seq_len: int = -1, aux_tokens: int = 30,
     
     for i, cell in enumerate(x):
         nonzero_mask = np.nonzero(cell)[0]
-        sorted_indices = nonzero_mask[np.argsort(-cell[nonzero_mask])][:max_seq_len]
+        # Filter to only keep genes within valid vocabulary range
+        valid_genes_mask = nonzero_mask < max_gene_idx
+        valid_nonzero_mask = nonzero_mask[valid_genes_mask]
         
-        # Map gene indices to valid range if they exceed vocabulary
-        if len(sorted_indices) > 0 and sorted_indices.max() >= max_gene_idx:
-            # Use modulo to map large indices to valid range, preserving relative ordering
-            sorted_indices = (sorted_indices % max_gene_idx)
+        if len(valid_nonzero_mask) > 0:
+            # Sort by expression values and take top genes within sequence length limit
+            sorted_indices = valid_nonzero_mask[np.argsort(-cell[valid_nonzero_mask])][:max_seq_len].astype(np.int32)
+        else:
+            sorted_indices = np.empty(0, dtype=np.int32)
         
         # Add auxiliary tokens offset
         sorted_indices = sorted_indices + aux_tokens
