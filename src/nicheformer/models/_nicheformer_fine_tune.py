@@ -103,6 +103,7 @@ class NicheformerFineTune(pl.LightningModule):
             self.cls_loss = nn.MSELoss()
         elif supervised_task == 'niche_classification':
             self.linear_head = nn.Linear(dim_model, self.hparams.n_classes, bias=False)
+            self.softmax = nn.Softmax(dim=1)
             self.cls_loss = nn.CrossEntropyLoss()
         elif supervised_task == 'niche_binary_classification':
             self.linear_head = nn.Linear(dim_model, self.hparams.dim_prediction, bias=False)
@@ -134,7 +135,7 @@ class NicheformerFineTune(pl.LightningModule):
         for i, layer in enumerate(self.backbone.encoder.layers):
             embeddings = layer(
                 embeddings, 
-                is_causal=self.backbone.autoregressive,
+                is_causal=getattr(self.backbone, 'autoregressive', False),
                 src_key_padding_mask=attention_mask
             )
             if i in self.hparams.extract_layers:
@@ -197,7 +198,9 @@ class NicheformerFineTune(pl.LightningModule):
             self.log('train/regression_loss', loss, sync_dist=True, prog_bar=True)
 
         if self.task == 'classification':
-            cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
+            # Only reshape for multiclass classification
+            if self.hparams.supervised_task == 'niche_multiclass_classification':
+                cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
 
             if self.hparams.supervised_task == 'niche_binary_classification':
                 label = (label != 0).int()
@@ -205,8 +208,9 @@ class NicheformerFineTune(pl.LightningModule):
             if self.hparams.ignore_zeros:
                 label = torch.where(label == 0, torch.tensor(-100, dtype=torch.long), label)
 
+            # For regular classification, labels should be 1D class indices
             if self.hparams.supervised_task == 'niche_classification':
-                label = label.view(-1, 1)
+                label = label.view(-1)  # Changed from view(-1, 1) to view(-1)
 
             loss = self.cls_loss(cls_prediction, label.long())
             self.log('train/classification_loss', loss, sync_dist=True)
@@ -240,7 +244,9 @@ class NicheformerFineTune(pl.LightningModule):
             self.log('val/regression_loss', loss, sync_dist=True)
 
         if self.task == 'classification':
-            cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
+            # Only reshape for multiclass classification
+            if self.hparams.supervised_task == 'niche_multiclass_classification':
+                cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
 
             if self.hparams.supervised_task == 'niche_binary_classification':
                 label = (label != 0).int()
@@ -248,8 +254,9 @@ class NicheformerFineTune(pl.LightningModule):
             if self.hparams.ignore_zeros:
                 label = torch.where(label == 0, torch.tensor(-100, dtype=torch.long), label)
 
+            # For regular classification, labels should be 1D class indices
             if self.hparams.supervised_task == 'niche_classification':
-                label = label.view(-1, 1)
+                label = label.view(-1)  # Changed from view(-1, 1) to view(-1)
 
             loss = self.cls_loss(cls_prediction, label.long())
             self.log('val/classification_loss', loss, sync_dist=True)
@@ -282,7 +289,9 @@ class NicheformerFineTune(pl.LightningModule):
             self.log('test/regression_loss', loss, sync_dist=True)
 
         if self.task == 'classification':
-            cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
+            # Only reshape for multiclass classification
+            if self.hparams.supervised_task == 'niche_multiclass_classification':
+                cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
 
             if self.hparams.supervised_task == 'niche_binary_classification':
                 label = (label != 0).int()
@@ -290,8 +299,9 @@ class NicheformerFineTune(pl.LightningModule):
             if self.hparams.ignore_zeros:
                 label = torch.where(label == 0, torch.tensor(-100, dtype=torch.long), label)
 
+            # For regular classification, labels should be 1D class indices
             if self.hparams.supervised_task == 'niche_classification':
-                label = label.view(-1, 1)
+                label = label.view(-1)  # Changed from view(-1, 1) to view(-1)
 
             loss = self.cls_loss(cls_prediction, label.long())
             self.log('test/classification_loss', loss, sync_dist=True)
@@ -312,8 +322,13 @@ class NicheformerFineTune(pl.LightningModule):
         cls_prediction = predictions['cls_prediction']
 
         if self.task == 'classification':
-            cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
-            predictions = torch.argmax(cls_prediction, dim=1)
+            # Only reshape for multiclass classification
+            if self.hparams.supervised_task == 'niche_multiclass_classification':
+                cls_prediction = cls_prediction.view(-1, self.hparams.n_classes, self.hparams.dim_prediction)
+                predictions = torch.argmax(cls_prediction, dim=1)
+            else:
+                # For regular classification, cls_prediction is already [batch_size, n_classes]
+                predictions = torch.argmax(cls_prediction, dim=1)
         else:
             predictions = cls_prediction
 
@@ -342,7 +357,7 @@ class NicheformerFineTune(pl.LightningModule):
             embeddings = self.backbone.encoder.layers[i](
                 embeddings,
                 src_key_padding_mask=attention_mask,
-                is_causal=self.backbone.autoregressive
+                is_causal=getattr(self.backbone, 'autoregressive', False)
             )
 
         return embeddings

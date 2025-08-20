@@ -151,13 +151,25 @@ def create_splits(adata, train_frac=0.7, val_frac=0.15, test_frac=0.15, random_s
 
 
 @numba.jit(nopython=True, nogil=True)
-def _sub_tokenize_data(x: np.array, max_seq_len: int = -1, aux_tokens: int = 30):
-    """Tokenize the input gene vector"""
+def _sub_tokenize_data(x: np.array, max_seq_len: int = -1, aux_tokens: int = 30, vocab_size: int = 20345):
+    """Tokenize the input gene vector with vocabulary size constraints"""
     scores_final = np.empty((x.shape[0], max_seq_len if max_seq_len > 0 else x.shape[1]))
+    
+    # Calculate the maximum allowed gene index to fit within vocabulary
+    # Reserve space for auxiliary tokens and a small buffer for other special tokens
+    max_gene_idx = vocab_size - aux_tokens - 5  # 5 tokens buffer for special tokens
+    
     for i, cell in enumerate(x):
         nonzero_mask = np.nonzero(cell)[0]
-        sorted_indices = nonzero_mask[np.argsort(-cell[nonzero_mask])][:max_seq_len] 
-        sorted_indices = sorted_indices + aux_tokens # we reserve some tokens for padding etc (just in case)
+        sorted_indices = nonzero_mask[np.argsort(-cell[nonzero_mask])][:max_seq_len]
+        
+        # Map gene indices to valid range if they exceed vocabulary
+        if len(sorted_indices) > 0 and sorted_indices.max() >= max_gene_idx:
+            # Use modulo to map large indices to valid range, preserving relative ordering
+            sorted_indices = (sorted_indices % max_gene_idx)
+        
+        # Add auxiliary tokens offset
+        sorted_indices = sorted_indices + aux_tokens
         if max_seq_len:
             scores = np.zeros(max_seq_len, dtype=np.int32)
         else:
@@ -185,7 +197,7 @@ class NicheformerDataset(Dataset):
     """Dataset for Nicheformer"""
 
     def __init__(self, adata, technology_mean, split='train', max_seq_len=4096, aux_tokens=30, chunk_size=1000,
-                 metadata_fields=None):
+                 metadata_fields=None, vocab_size=20345):
         """
         Initialize the dataset
 
@@ -201,6 +213,7 @@ class NicheformerDataset(Dataset):
                                       'obs': ['field1', 'field2'],  # fields from adata.obs
                                       'obsm': ['field3', 'field4']  # fields from adata.obsm
                                   }
+            vocab_size (int): Vocabulary size of the model's embedding layer
         """
         self.adata = adata.copy()
         
@@ -224,6 +237,7 @@ class NicheformerDataset(Dataset):
         self.aux_tokens = aux_tokens
         self.chunk_size = chunk_size
         self.metadata_fields = metadata_fields or {'obs': [], 'obsm': []}
+        self.vocab_size = vocab_size
 
         # Initialize storage for tokenized data
         self.n_cells = len(self.adata)
@@ -272,8 +286,8 @@ class NicheformerDataset(Dataset):
 
         x = x / tech_mean.reshape((1, -1))
 
-        # Tokenize
-        tokens = _sub_tokenize_data(x, self.max_seq_len, self.aux_tokens).astype(np.int32)
+        # Tokenize with vocabulary size constraint
+        tokens = _sub_tokenize_data(x, self.max_seq_len, self.aux_tokens, vocab_size=self.vocab_size).astype(np.int32)
 
         return tokens
 
